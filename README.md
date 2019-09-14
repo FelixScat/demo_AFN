@@ -2,7 +2,7 @@
 
 ## Why AFN
 
-为什么
+大多项目中我们都会使用网络请求去和服务端进行交互，而对于iOS开发者而言，最广为人知的网络请求框架莫过于 **AFNetworking** 了，那么大家有没有想过为什么广大的开发者选择了它，它对比iOS原生的网络请求有什么区别呢，下面我会总结下自己对于 AFN 的看法和体会，也希望能对一样学习的小伙伴提供一些帮助
 
 ## AFN 解析
 
@@ -483,8 +483,297 @@ static NSArray * AFHTTPRequestSerializerObservedKeyPaths() {
 }
 ```
 
+在获取 **header** 的时候使用串行队列同步进行获取，保障数据一致性
 
+```objective-c
+- (NSDictionary *)HTTPRequestHeaders {
+    NSDictionary __block *value;
+    dispatch_sync(self.requestHeaderModificationQueue, ^{
+        value = [NSDictionary dictionaryWithDictionary:self.mutableHTTPRequestHeaders];
+    });
+    return value;
+}
+```
+
+在设置 **header** 的时候使用GCD的栅栏函数保证顺序设置
+
+```objective-c
+- (void)setValue:(NSString *)value
+forHTTPHeaderField:(NSString *)field
+{
+    dispatch_barrier_async(self.requestHeaderModificationQueue, ^{
+        [self.mutableHTTPRequestHeaders setValue:value forKey:field];
+    });
+}
+```
+
+在请求序列化的时候还贴心的为我们实现了 **HTTP BASIC** 认证
+
+```objective-c
+- (void)setAuthorizationHeaderFieldWithUsername:(NSString *)username
+                                       password:(NSString *)password
+{
+    NSData *basicAuthCredentials = [[NSString stringWithFormat:@"%@:%@", username, password] dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *base64AuthCredentials = [basicAuthCredentials base64EncodedStringWithOptions:(NSDataBase64EncodingOptions)0];
+    [self setValue:[NSString stringWithFormat:@"Basic %@", base64AuthCredentials] forHTTPHeaderField:@"Authorization"];
+}
+```
+
+下面具体看初始化Request的阶段
+
+```objective-c
+- (NSMutableURLRequest *)requestWithMethod:(NSString *)method
+                                 URLString:(NSString *)URLString
+                                parameters:(id)parameters
+                                     error:(NSError *__autoreleasing *)error
+{
+    NSParameterAssert(method);
+    NSParameterAssert(URLString);
+
+		// 生成url
+    NSURL *url = [NSURL URLWithString:URLString];
+
+    NSParameterAssert(url);
+		
+		// 生成request并设置http方法
+    NSMutableURLRequest *mutableRequest = [[NSMutableURLRequest alloc] initWithURL:url];
+    mutableRequest.HTTPMethod = method;
+		
+		// 取出观察的对象，使用KVC对request进行设置
+    for (NSString *keyPath in AFHTTPRequestSerializerObservedKeyPaths()) {
+        if ([self.mutableObservedChangedKeyPaths containsObject:keyPath]) {
+            [mutableRequest setValue:[self valueForKeyPath:keyPath] forKey:keyPath];
+        }
+    }
+
+    mutableRequest = [[self requestBySerializingRequest:mutableRequest withParameters:parameters error:error] mutableCopy];
+
+	return mutableRequest;
+}
+```
+
+下面还有进一步的解析
+
+```objective-c
+- (NSURLRequest *)requestBySerializingRequest:(NSURLRequest *)request
+                               withParameters:(id)parameters
+                                        error:(NSError *__autoreleasing *)error
+{
+    NSParameterAssert(request);
+
+    NSMutableURLRequest *mutableRequest = [request mutableCopy];
+
+		// 设置Header
+    [self.HTTPRequestHeaders enumerateKeysAndObjectsUsingBlock:^(id field, id value, BOOL * __unused stop) {
+        if (![request valueForHTTPHeaderField:field]) {
+            [mutableRequest setValue:value forHTTPHeaderField:field];
+        }
+    }];
+
+		// 传入的参数会进行解析，如果没有传入解析handler会使用默认的
+    NSString *query = nil;
+    if (parameters) {
+        if (self.queryStringSerialization) {
+            NSError *serializationError;
+            query = self.queryStringSerialization(request, parameters, &serializationError);
+
+            if (serializationError) {
+                if (error) {
+                    *error = serializationError;
+                }
+
+                return nil;
+            }
+        } else {
+            switch (self.queryStringSerializationStyle) {
+                case AFHTTPRequestQueryStringDefaultStyle:
+                    query = AFQueryStringFromParameters(parameters);
+                    break;
+            }
+        }
+    }
+
+		// 如果请求的类型是（GET，HEAD，DELETE）就将参数编码进URL中
+    if ([self.HTTPMethodsEncodingParametersInURI containsObject:[[request HTTPMethod] uppercaseString]]) {
+        if (query && query.length > 0) {
+            mutableRequest.URL = [NSURL URLWithString:[[mutableRequest.URL absoluteString] stringByAppendingFormat:mutableRequest.URL.query ? @"&%@" : @"?%@", query]];
+        }
+    } else {
+        // 这里是将参数放入Body中，如果没有参数传入就默认传入空字符串，生成payload
+        if (!query) {
+            query = @"";
+        }
+      	// 这里的请求是排除了（GET，HEAD，DELETE）的方式，因此没有写入content-type的话会默认设置header为表单提交方式
+        if (![mutableRequest valueForHTTPHeaderField:@"Content-Type"]) {
+            [mutableRequest setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+        }
+        [mutableRequest setHTTPBody:[query dataUsingEncoding:self.stringEncoding]];
+    }
+
+    return mutableRequest;
+}
+```
+
+除此之外还有其他特殊的处理，比如对请求体的分界线处理等，这里不过多叙述
+
+下面来看对请求结果的序列化
+
+```objective-c
+// 使用并行队列对响应进行处理，提升解析效率
+dispatch_async(url_session_manager_processing_queue(), ^{
+  NSError *serializationError = nil;
+  responseObject = [manager.responseSerializer responseObjectForResponse:task.response data:data error:&serializationError];
+
+  if (self.downloadFileURL) {
+    responseObject = self.downloadFileURL;
+  }
+
+  if (responseObject) {
+    userInfo[AFNetworkingTaskDidCompleteSerializedResponseKey] = responseObject;
+  }
+
+  if (serializationError) {
+    userInfo[AFNetworkingTaskDidCompleteErrorKey] = serializationError;
+  }
+
+  // 处理完成后还是GCD统一处理
+  dispatch_group_async(manager.completionGroup ?: url_session_manager_completion_group(), manager.completionQueue ?: dispatch_get_main_queue(), ^{
+    if (self.completionHandler) {
+      self.completionHandler(task.response, responseObject, serializationError);
+    }
+		// 发出通知
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [[NSNotificationCenter defaultCenter] postNotificationName:AFNetworkingTaskDidCompleteNotification object:task userInfo:userInfo];
+    });
+  });
+});
+```
+
+接下来看 **AFJSONResponseSerializer** 
+
+```objective-c
+- (id)responseObjectForResponse:(NSURLResponse *)response
+                           data:(NSData *)data
+                          error:(NSError *__autoreleasing *)error
+{
+		// 第一步永远是校验数据合法性，这种编程习惯值得我们学习，实现功能的同时首先要考虑错误和非法输入
+    if (![self validateResponse:(NSHTTPURLResponse *)response data:data error:error]) {
+        if (!error || AFErrorOrUnderlyingErrorHasCodeInDomain(*error, NSURLErrorCannotDecodeContentData, AFURLResponseSerializationErrorDomain)) {
+            return nil;
+        }
+    }
+
+    // 检查body是否为空格，对应rails的一种处理方式
+    BOOL isSpace = [data isEqualToData:[NSData dataWithBytes:" " length:1]];
+    
+    if (data.length == 0 || isSpace) {
+        return nil;
+    }
+    
+    NSError *serializationError = nil;
+    // 真正解析json的地方
+    id responseObject = [NSJSONSerialization JSONObjectWithData:data options:self.readingOptions error:&serializationError];
+
+    if (!responseObject)
+    {
+        if (error) {
+            *error = AFErrorWithUnderlyingError(serializationError, *error);
+        }
+        return nil;
+    }
+    
+		// 移除json解析出来的null对象
+    if (self.removesKeysWithNullValues) 
+        return AFJSONObjectByRemovingKeysWithNullValues(responseObject, self.readingOptions);
+    }
+
+    return responseObject;
+}
+```
+
+json解析就到这里了，主要能看出框架作者编程的模块化、安全编程等优秀的习惯
 
 ### 安全策略部分 AFSecurityPolicy
+
+**AFHTTPSessionManager** 在初始化的时候使用了默认的安全策略  `self.securityPolicy = [AFSecurityPolicy defaultPolicy]` ，下面我们来研究下安全策略是干什么用的
+
+我们都知道网络请求有非加密链接，在用浏览器打开一些杂七杂八的网站的时候，总会提示你当前的连接不安全，也即是说，如果你的网络请求没有使用 **ssl** 或 **tls** 加密算法加密，[这一部分可以看这篇博客](https://k.felixplus.top/https/) ，当然，如果我们请求的服务使用了非自签名证书，并且该CA是默认被内置在苹果中的话我们是不需要额外配置什么东西的，但是事情总有例外，有些业务方出于一些需求需要使用自签名证书，这就需要我们配置 **AFSecurityPolicy** 
+
+```objective-c
++ (instancetype)defaultPolicy {
+    AFSecurityPolicy *securityPolicy = [[self alloc] init];
+    securityPolicy.SSLPinningMode = AFSSLPinningModeNone;
+
+    return securityPolicy;
+}
+```
+
+可以看到这里使用默认的配置 **AFSSLPinningModeNone**
+
+```objective-c
+typedef NS_ENUM(NSUInteger, AFSSLPinningMode) {
+    AFSSLPinningModeNone, 				// 只验证iOS系统内置的证书
+    AFSSLPinningModePublicKey,		// 验证服务下发的证书(与本地证书)，仅对比公钥
+    AFSSLPinningModeCertificate,	// 验证服务下发的证书(与本地证书)，会先验证域名和有效期等信息
+};
+```
+
+对于获取服务器的公钥你可以使用以下命令
+
+```sh
+openssl s_client -showcerts -connect www.bing.com:443 </dev/null | openssl x509 -outform DER > server.cer
+```
+
+接下来将你所需要使用服务的公钥加入工程中，使用的时候可以如下配置
+
+```objective-c
+AFSecurityPolicy *policy = [AFSecurityPolicy policyWithPinningMode:AFSSLPinningModePublicKey];
+
+manager.securityPolicy = policy;
+```
+
+你可能会问，这里我们也没有指定证书啊，放心，我们看方法体
+
+```objective-c
++ (instancetype)policyWithPinningMode:(AFSSLPinningMode)pinningMode {
+  	// 这个初始化方法里面传入了证书
+    return [self policyWithPinningMode:pinningMode withPinnedCertificates:[self defaultPinnedCertificates]];
+}
+
+// 会从当前的类被加载的bundle中获取
++ (NSSet *)defaultPinnedCertificates {
+    static NSSet *_defaultPinnedCertificates = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSBundle *bundle = [NSBundle bundleForClass:[self class]];
+        _defaultPinnedCertificates = [self certificatesInBundle:bundle];
+    });
+
+    return _defaultPinnedCertificates;
+}
+
+// 获取所有以.cer结尾的文件
++ (NSSet *)certificatesInBundle:(NSBundle *)bundle {
+    NSArray *paths = [bundle pathsForResourcesOfType:@"cer" inDirectory:@"."];
+
+    NSMutableSet *certificates = [NSMutableSet setWithCapacity:[paths count]];
+    for (NSString *path in paths) {
+        NSData *certificateData = [NSData dataWithContentsOfFile:path];
+        [certificates addObject:certificateData];
+    }
+
+    return [NSSet setWithSet:certificates];
+}
+```
+
+## 永远对代码有敬畏之心
+
+很多人可能觉得写一个网络请求很简单，随随便便就能完成，可是不要忘了，在软件开发过程中开发只是第一步，而且不是权重最大的一部，如果你的代码模块复杂，逻辑混乱不堪那么在后续的维护中就会相当复杂，我上面总结了那么多的使用模块在外面的调用不过是一行 `[[AFHTTPSessionManager manager] GET:@"http://httpbin.org/get" parameters:nil progress:nil success:nil failure:nil]` 这么简单。在提升自己的路上，我们做的还有很多
+
+
+
+
+
+
 
 
