@@ -1,0 +1,15 @@
+use_frameworks!
+
+platform :ios, '8.0'
+
+target 'demo_AFN_Example' do
+  pod 'demo_AFN', :path => '../'
+  
+  pod 'AFNetworking'
+
+  target 'demo_AFN_Tests' do
+    inherit! :search_paths
+
+    
+  end
+end

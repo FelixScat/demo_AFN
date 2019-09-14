@@ -1,0 +1,6 @@
+framework module demo_AFN {
+  umbrella header "demo_AFN-umbrella.h"
+
+  export *
+  module * { export * }
+}
