@@ -10,7 +10,7 @@
 
 **GET**
 
-```objective-c
+```objectivec
 - (void)sendRequest {
     
     AFHTTPSessionManager *manager = [AFHTTPSessionManager manager];
