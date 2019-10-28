@@ -3,16 +3,16 @@
   "version": "0.1.0",
   "summary": "A short description of demo_AFN.",
   "description": "TODO: Add long description of the pod here.",
-  "homepage": "https://github.com/doubanjiang/demo_AFN",
+  "homepage": "https://github.com/felix/demo_AFN",
   "license": {
     "type": "MIT",
     "file": "LICENSE"
   },
   "authors": {
-    "doubanjiang": "doubanjiang@2dfire.com"
+    "felix": "felix@gmail.com"
   },
   "source": {
-    "git": "https://github.com/doubanjiang/demo_AFN.git",
+    "git": "https://github.com/felix/demo_AFN.git",
     "tag": "0.1.0"
   },
   "platforms": {
