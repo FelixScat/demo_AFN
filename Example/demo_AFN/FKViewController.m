@@ -30,6 +30,8 @@
 
 - (void)sendRequest {
     
+//    [[AFHTTPSessionManager manager] GET:@"http://httpbin.org/get" parameters:nil progress:nil success:nil failure:nil];
+    
     AFHTTPSessionManager *manager = [AFHTTPSessionManager manager];
     NSURLSessionDataTask *task = [manager GET:@"http://httpbin.org/get" parameters:@{@"arg1":@(100), @"arg2": @{@"foo":@"bar"}} progress:nil success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
         
@@ -37,8 +39,9 @@
         
     }];
     
-    [task resume];
+    AFSecurityPolicy *policy = [AFSecurityPolicy policyWithPinningMode:AFSSLPinningModePublicKey];
     
+    manager.securityPolicy = policy;
 //    AFHTTPSessionManager *manager = [AFHTTPSessionManager manager];
 //    NSURLSessionDataTask *task = [manager POST:@"http://httpbin.org/post" parameters:@{@"arg1":@(100), @"arg2": @{@"foo":@"bar"}} progress:nil success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
 //
